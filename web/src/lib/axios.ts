@@ -20,7 +20,8 @@ const baseURL = resolveBaseURL();
 
 export const api = axios.create({
   baseURL,
-  timeout: 30_000,
+  // Folder uploads enqueue many metadata requests; allow slow responses under load.
+  timeout: 120_000,
 });
 
 api.interceptors.request.use((config) => {

@@ -43,8 +43,34 @@ export function useDeleteFile() {
     mutationFn: (fileId: string) => deleteFile(fileId),
     onSuccess: async (_data, fileId) => {
       await queryClient.invalidateQueries({ queryKey: filesKeys.all });
+      await queryClient.invalidateQueries({ queryKey: ["filesystem"] });
       queryClient.removeQueries({ queryKey: filesKeys.detail(fileId) });
       queryClient.removeQueries({ queryKey: filesKeys.shares(fileId) });
+    },
+  });
+}
+
+export function useDeleteFiles() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (fileIds: string[]) => {
+      const results = await Promise.allSettled(fileIds.map((id) => deleteFile(id)));
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        throw new Error(
+          failed.length === fileIds.length
+            ? "Could not delete selected files"
+            : `Deleted ${fileIds.length - failed.length} of ${fileIds.length} files`
+        );
+      }
+    },
+    onSuccess: async (_data, fileIds) => {
+      await queryClient.invalidateQueries({ queryKey: filesKeys.all });
+      await queryClient.invalidateQueries({ queryKey: ["filesystem"] });
+      for (const fileId of fileIds) {
+        queryClient.removeQueries({ queryKey: filesKeys.detail(fileId) });
+        queryClient.removeQueries({ queryKey: filesKeys.shares(fileId) });
+      }
     },
   });
 }

@@ -1,95 +1,130 @@
-import axios from "axios";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { toast } from "sonner";
 
-import { completeFile, createFile } from "@/lib/api/files";
-import { apiErrorMessage } from "@/lib/axios";
+import { filesystemKeys } from "@/hooks/useFilesystem";
+import { collectFilesFromFileList } from "@/lib/collectFiles";
+import {
+  uploadQueue,
+  type UploadItemSnapshot,
+  type UploadItemStatus,
+  type UploadSummary,
+} from "@/lib/uploadQueue";
 
-export interface UploadItem {
-  id: string;
-  file: File;
-  fileId: string | null;
-  status: "queued" | "creating" | "uploading" | "completing" | "done" | "error";
-  progress: number;
-  error: string | null;
-}
+export type { UploadItemSnapshot as UploadItem, UploadItemStatus, UploadSummary };
 
-let nextId = 0;
-function makeId(): string {
-  nextId += 1;
-  return `${Date.now()}-${nextId}`;
-}
+const INVALIDATE_DEBOUNCE_MS = 1000;
 
-export function useUpload() {
+function useDebouncedInvalidate() {
   const queryClient = useQueryClient();
-  const [items, setItems] = useState<UploadItem[]>([]);
-  const itemsRef = useRef<UploadItem[]>([]);
-  itemsRef.current = items;
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const patch = useCallback((id: string, patch: Partial<UploadItem>) => {
-    setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
-  }, []);
+  const invalidate = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    timerRef.current = setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey: ["files"] });
+      void queryClient.invalidateQueries({ queryKey: filesystemKeys.all });
+    }, INVALIDATE_DEBOUNCE_MS);
+  }, [queryClient]);
 
-  const remove = useCallback((id: string) => {
-    setItems((current) => current.filter((item) => item.id !== id));
-  }, []);
-
-  const clear = useCallback(() => {
-    setItems((current) => current.filter((item) => item.status === "uploading" || item.status === "creating" || item.status === "completing"));
-  }, []);
-
-  const uploadOne = useCallback(
-    async (item: UploadItem) => {
-      try {
-        patch(item.id, { status: "creating", progress: 0 });
-        const created = await createFile({
-          filename: item.file.name,
-          content_type: item.file.type || "application/octet-stream",
-          size_bytes: item.file.size,
-        });
-        patch(item.id, { status: "uploading", fileId: created.file_id });
-
-        await axios.put(created.upload_url, item.file, {
-          headers: created.upload_headers,
-          onUploadProgress: (event) => {
-            if (!event.total) return;
-            const pct = Math.round((event.loaded / event.total) * 100);
-            patch(item.id, { progress: pct });
-          },
-          // Bypass any global default that adds auth headers.
-          transformRequest: [(data) => data],
-        });
-
-        patch(item.id, { status: "completing", progress: 100 });
-        await completeFile(created.file_id);
-        patch(item.id, { status: "done" });
-        await queryClient.invalidateQueries({ queryKey: ["files"] });
-      } catch (err) {
-        patch(item.id, { status: "error", error: apiErrorMessage(err, "Upload failed") });
+  useEffect(
+    () => () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
       }
     },
-    [patch, queryClient]
+    []
+  );
+
+  return invalidate;
+}
+
+export function useUpload(currentFolderId?: string | null) {
+  const invalidateFiles = useDebouncedInvalidate();
+
+  useEffect(() => {
+    uploadQueue.setBaseFolderId(currentFolderId ?? null);
+  }, [currentFolderId]);
+
+  useEffect(() => {
+    uploadQueue.setCallbacks({
+      onInvalidate: invalidateFiles,
+      onFirstError: (message) => toast.error(message),
+    });
+    return () => uploadQueue.setCallbacks({});
+  }, [invalidateFiles]);
+
+  const snapshot = useSyncExternalStore(
+    (onStoreChange) => uploadQueue.subscribe(onStoreChange),
+    () => uploadQueue.getSnapshot(),
+    () => uploadQueue.getSnapshot()
+  );
+
+  const active = useMemo(
+    () =>
+      snapshot.items.filter(
+        (item) =>
+          item.status === "creating" ||
+          item.status === "uploading" ||
+          item.status === "completing"
+      ),
+    [snapshot.items]
+  );
+
+  const errors = useMemo(
+    () => snapshot.items.filter((item) => item.status === "error"),
+    [snapshot.items]
+  );
+
+  const doneRecent = useMemo(
+    () => snapshot.items.filter((item) => item.status === "done").slice(-5),
+    [snapshot.items]
   );
 
   const enqueue = useCallback(
     (files: FileList | File[]) => {
-      const list = Array.from(files);
-      const newItems: UploadItem[] = list.map((file) => ({
-        id: makeId(),
-        file,
-        fileId: null,
-        status: "queued",
-        progress: 0,
-        error: null,
-      }));
-      setItems((current) => [...newItems, ...current]);
-      // Fire-and-forget; UI tracks state.
-      for (const item of newItems) {
-        void uploadOne(item);
-      }
-    },
-    [uploadOne]
+    const list = collectFilesFromFileList(files);
+    if (list.length === 0) {
+      toast.info("No files to upload (empty files and system files are skipped).");
+      return;
+    }
+    const added = uploadQueue.enqueue(list, currentFolderId ?? null);
+    if (added > 1) {
+      toast.info(`Uploading ${added} files. Keep this tab open.`);
+    }
+  },
+    [currentFolderId]
   );
 
-  return { items, enqueue, remove, clear };
+  const remove = useCallback((id: string) => {
+    uploadQueue.remove(id);
+  }, []);
+
+  const cancel = useCallback((id: string) => {
+    uploadQueue.cancel(id);
+  }, []);
+
+  const retry = useCallback((id: string) => {
+    uploadQueue.retry(id);
+  }, []);
+
+  const clearFinished = useCallback(() => {
+    uploadQueue.clearFinished();
+  }, []);
+
+  return {
+    summary: snapshot.summary,
+    items: snapshot.items,
+    active,
+    errors,
+    doneRecent,
+    speedBytesPerSec: uploadQueue.getSpeedBytesPerSec(),
+    enqueue,
+    remove,
+    cancel,
+    retry,
+    clearFinished,
+  };
 }

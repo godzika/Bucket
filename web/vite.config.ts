@@ -12,9 +12,29 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/files": {
+        target: "http://localhost:19000",
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     host: true,
     port: 5173,
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/files": {
+        target: "http://localhost:19000",
+        changeOrigin: true,
+      },
+    },
   },
 });
