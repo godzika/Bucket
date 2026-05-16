@@ -1,0 +1,129 @@
+import logging
+from functools import lru_cache
+from typing import Any
+from urllib.parse import quote
+
+import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
+
+from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _build_client(endpoint_url: str):
+    settings = get_settings()
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=settings.s3_access_key,
+        aws_secret_access_key=settings.s3_secret_key,
+        region_name=settings.s3_region,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_internal_s3():
+    """S3 client used by the API for server-side ops (HEAD, DELETE, ensure bucket)."""
+    return _build_client(get_settings().s3_endpoint_url)
+
+
+@lru_cache(maxsize=1)
+def get_public_s3():
+    """S3 client used to generate presigned URLs that browsers/clients can reach."""
+    return _build_client(get_settings().s3_public_endpoint_url)
+
+
+def ensure_bucket() -> None:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    try:
+        s3.head_bucket(Bucket=settings.s3_bucket)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchBucket", "NoSuchBucketPolicy"):
+            logger.info("Creating bucket %s", settings.s3_bucket)
+            s3.create_bucket(Bucket=settings.s3_bucket)
+        else:
+            raise
+
+
+def presigned_put(object_key: str, content_type: str) -> dict[str, Any]:
+    """Generate a presigned URL that lets a client PUT a single object.
+
+    The Content-Type header is part of the signature, so the client MUST send
+    exactly the same Content-Type. Size is not bound here; we validate it
+    server-side via HEAD when the client calls /complete.
+    """
+    settings = get_settings()
+    s3 = get_public_s3()
+    params: dict[str, Any] = {
+        "Bucket": settings.s3_bucket,
+        "Key": object_key,
+        "ContentType": content_type,
+    }
+    url = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params=params,
+        ExpiresIn=settings.presign_put_ttl_seconds,
+        HttpMethod="PUT",
+    )
+    headers = {"Content-Type": content_type}
+    return {
+        "url": url,
+        "headers": headers,
+        "expires_in": settings.presign_put_ttl_seconds,
+    }
+
+
+def _content_disposition(filename: str) -> str:
+    """Build an RFC 5987-compatible Content-Disposition header.
+
+    Falls back to an ASCII-only filename for legacy clients and provides
+    ``filename*=UTF-8''<percent-encoded>`` for modern ones.
+    """
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "download"
+    ascii_fallback = ascii_fallback.replace('"', "").replace("\\", "")
+    encoded = quote(filename.encode("utf-8"), safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def presigned_get(
+    object_key: str,
+    download_filename: str | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    s3 = get_public_s3()
+    params: dict[str, Any] = {
+        "Bucket": settings.s3_bucket,
+        "Key": object_key,
+    }
+    if download_filename:
+        params["ResponseContentDisposition"] = _content_disposition(download_filename)
+    url = s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params=params,
+        ExpiresIn=settings.presign_get_ttl_seconds,
+        HttpMethod="GET",
+    )
+    return {"url": url, "expires_in": settings.presign_get_ttl_seconds}
+
+
+def head_object(object_key: str) -> dict[str, Any] | None:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    try:
+        return s3.head_object(Bucket=settings.s3_bucket, Key=object_key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
+def delete_object(object_key: str) -> None:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    s3.delete_object(Bucket=settings.s3_bucket, Key=object_key)

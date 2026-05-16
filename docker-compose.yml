@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fileshare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fileshare}
+      POSTGRES_DB: ${POSTGRES_DB:-fileshare}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fileshare} -d ${POSTGRES_DB:-fileshare}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      # Host ports avoid Windows reserved ranges (often blocks 8989–9088, incl. 9000/9001)
+      - "19000:9000"
+      - "19001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} &&
+        mc mb --ignore-existing local/${S3_BUCKET:-files} &&
+        echo 'Bucket ready: ${S3_BUCKET:-files}'
+      "
+
+  web:
+    build:
+      context: ./web
+      args:
+        # Empty by default => bundle uses window.location.origin and nginx
+        # proxies /api/ to the api container. Override only when the SPA needs
+        # to call an API on a *different* origin than its own host.
+        VITE_API_URL: ${VITE_API_URL-}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME:-File Share Service}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-string}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-60}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://fileshare:fileshare@postgres:5432/fileshare}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:5173}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-files}
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-5368709120}
+      PRESIGN_PUT_TTL_SECONDS: ${PRESIGN_PUT_TTL_SECONDS:-3600}
+      PRESIGN_GET_TTL_SECONDS: ${PRESIGN_GET_TTL_SECONDS:-900}
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:
+  minio_data:

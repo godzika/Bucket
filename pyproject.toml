@@ -1,0 +1,35 @@
+[project]
+name = "file-share-service"
+version = "0.1.0"
+description = "FastAPI file sharing & storage service with JWT auth and S3-compatible storage (MinIO)."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.4.0",
+    "sqlalchemy>=2.0.30",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.2",
+    "argon2-cffi>=23.1.0",
+    "PyJWT>=2.9.0",
+    "python-multipart>=0.0.9",
+    "boto3>=1.34.0",
+    "email-validator>=2.2.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
