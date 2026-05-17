@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +8,7 @@ from app.db import get_db
 from app.models import ShareLink, StoredFile
 from app.schemas import FileDownloadOut, PublicDownloadIn
 from app.security import verify_password
-from app.storage import presigned_get
+from app.storage import presigned_get, resolve_public_endpoint_url
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
@@ -41,6 +41,7 @@ async def share_info(token: str, db: AsyncSession = Depends(get_db)) -> dict:
 @router.post("/{token}/download", response_model=FileDownloadOut)
 async def share_download(
     token: str,
+    request: Request,
     payload: PublicDownloadIn | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> FileDownloadOut:
@@ -51,5 +52,9 @@ async def share_download(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password"
             )
-    presigned = presigned_get(file_record.object_key, download_filename=file_record.original_filename)
+    presigned = presigned_get(
+        file_record.object_key,
+        download_filename=file_record.original_filename,
+        public_endpoint_url=resolve_public_endpoint_url(request),
+    )
     return FileDownloadOut(download_url=presigned["url"], expires_in=presigned["expires_in"])

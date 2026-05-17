@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import get_current_user
+from app.filesystem import create_user_root
 from app.models import User
 from app.schemas import RegisterIn, TokenOut, UserOut
 from app.security import create_access_token, hash_password, verify_password
@@ -18,6 +19,8 @@ async def register(payload: RegisterIn, db: AsyncSession = Depends(get_db)) -> U
     user = User(email=payload.email.lower(), hashed_password=hash_password(payload.password))
     db.add(user)
     try:
+        await db.flush()
+        await create_user_root(db, user.id)
         await db.commit()
     except IntegrityError:
         await db.rollback()

@@ -1,11 +1,12 @@
 import logging
 from functools import lru_cache
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from starlette.requests import Request
 
 from app.config import get_settings
 
@@ -36,6 +37,31 @@ def get_public_s3():
     return _build_client(get_settings().s3_public_endpoint_url)
 
 
+def resolve_public_endpoint_url(request: Request | None = None) -> str:
+    """Presigned SigV4 URLs must use the same host the browser will PUT/GET to.
+
+    Prefer the request ``Origin`` (or ``Referer``) so ``localhost:5173`` and a LAN
+    IP in ``S3_PUBLIC_ENDPOINT_URL`` both work without manual env changes.
+    """
+    settings = get_settings()
+    if request is not None:
+        origin = request.headers.get("origin")
+        if not origin:
+            referer = request.headers.get("referer")
+            if referer:
+                parsed = urlparse(referer)
+                if parsed.scheme and parsed.netloc:
+                    origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin:
+            return origin.rstrip("/")
+    return settings.s3_public_endpoint_url.rstrip("/")
+
+
+def _public_s3_for_endpoint(public_endpoint_url: str | None = None):
+    endpoint = public_endpoint_url or get_settings().s3_public_endpoint_url
+    return _build_client(endpoint)
+
+
 def ensure_bucket() -> None:
     settings = get_settings()
     s3 = get_internal_s3()
@@ -50,7 +76,12 @@ def ensure_bucket() -> None:
             raise
 
 
-def presigned_put(object_key: str, content_type: str) -> dict[str, Any]:
+def presigned_put(
+    object_key: str,
+    content_type: str,
+    *,
+    public_endpoint_url: str | None = None,
+) -> dict[str, Any]:
     """Generate a presigned URL that lets a client PUT a single object.
 
     The Content-Type header is part of the signature, so the client MUST send
@@ -58,7 +89,7 @@ def presigned_put(object_key: str, content_type: str) -> dict[str, Any]:
     server-side via HEAD when the client calls /complete.
     """
     settings = get_settings()
-    s3 = get_public_s3()
+    s3 = _public_s3_for_endpoint(public_endpoint_url)
     params: dict[str, Any] = {
         "Bucket": settings.s3_bucket,
         "Key": object_key,
@@ -93,9 +124,11 @@ def _content_disposition(filename: str) -> str:
 def presigned_get(
     object_key: str,
     download_filename: str | None = None,
+    *,
+    public_endpoint_url: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    s3 = get_public_s3()
+    s3 = _public_s3_for_endpoint(public_endpoint_url)
     params: dict[str, Any] = {
         "Bucket": settings.s3_bucket,
         "Key": object_key,
@@ -127,3 +160,76 @@ def delete_object(object_key: str) -> None:
     settings = get_settings()
     s3 = get_internal_s3()
     s3.delete_object(Bucket=settings.s3_bucket, Key=object_key)
+
+
+def multipart_part_count(size_bytes: int, part_size_bytes: int) -> int:
+    return (size_bytes + part_size_bytes - 1) // part_size_bytes
+
+
+def create_multipart_upload(object_key: str, content_type: str) -> str:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    resp = s3.create_multipart_upload(
+        Bucket=settings.s3_bucket,
+        Key=object_key,
+        ContentType=content_type,
+    )
+    return resp["UploadId"]
+
+
+def presigned_upload_part(
+    object_key: str,
+    upload_id: str,
+    part_number: int,
+    *,
+    public_endpoint_url: str | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    s3 = _public_s3_for_endpoint(public_endpoint_url)
+    url = s3.generate_presigned_url(
+        ClientMethod="upload_part",
+        Params={
+            "Bucket": settings.s3_bucket,
+            "Key": object_key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=settings.presign_put_ttl_seconds,
+        HttpMethod="PUT",
+    )
+    return {
+        "part_number": part_number,
+        "url": url,
+        "headers": {},
+        "expires_in": settings.presign_put_ttl_seconds,
+    }
+
+
+def complete_multipart_upload(
+    object_key: str,
+    upload_id: str,
+    parts: list[dict[str, Any]],
+) -> None:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    s3.complete_multipart_upload(
+        Bucket=settings.s3_bucket,
+        Key=object_key,
+        UploadId=upload_id,
+        MultipartUpload={"Parts": sorted(parts, key=lambda p: p["PartNumber"])},
+    )
+
+
+def abort_multipart_upload(object_key: str, upload_id: str) -> None:
+    settings = get_settings()
+    s3 = get_internal_s3()
+    try:
+        s3.abort_multipart_upload(
+            Bucket=settings.s3_bucket,
+            Key=object_key,
+            UploadId=upload_id,
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in ("NoSuchUpload", "404"):
+            raise

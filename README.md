@@ -17,7 +17,9 @@ A self-hosted file sharing & storage service. Backend in **FastAPI** with S3-com
 |---|---|---|
 | `JWT_SECRET` | `change-me-...` | **Set this** in production |
 | `JWT_ACCESS_TTL_MINUTES` | `60` | Access token lifetime |
-| `MAX_FILE_BYTES` | `5368709120` | **5 GB** — single PUT max for S3-compat |
+| `SINGLE_PUT_MAX_BYTES` | `5368709120` | **5 GB** — max size for a single presigned PUT |
+| `MAX_FILE_BYTES` | `5497558138880` | **5 TiB** — max stored object (multipart above 5 GB) |
+| `MULTIPART_PART_SIZE_BYTES` | `67108864` | **64 MiB** — size of each multipart part |
 | `S3_ENDPOINT_URL` | `http://minio:9000` | Used by API container internally |
 | `S3_PUBLIC_ENDPOINT_URL` | `http://localhost:9000` | Used to sign URLs that **clients** can reach |
 | `S3_BUCKET` | `files` | Bucket auto-created on startup |
@@ -41,7 +43,11 @@ Services:
 
 Database migrations run automatically on API start (see `scripts/entrypoint.sh`).
 
-## Upload flow (presigned PUT)
+## Upload flow
+
+Files **≤ 5 GB** use a single presigned PUT. Files **> 5 GB** use S3 multipart upload (parts uploaded directly to storage; the API only signs URLs and finalizes).
+
+### Single PUT (≤ 5 GB)
 
 ```mermaid
 sequenceDiagram
@@ -49,17 +55,36 @@ sequenceDiagram
   participant C as Client
   participant A as FastAPI
   participant S as MinIO
-  C->>A: POST /api/files (filename, content_type, size_bytes)
-  A->>A: Create StoredFile (status=pending)
-  A-->>C: { file_id, upload_url, upload_headers }
+  C->>A: POST /api/files
+  A-->>C: upload_method=PUT, upload_url
   C->>S: PUT upload_url (file body)
-  S-->>C: 200 OK
   C->>A: POST /api/files/{id}/complete
-  A->>S: HEAD object (verify size)
-  A-->>C: { status: "ready" }
+  A->>S: HEAD object
+  A-->>C: status=ready
 ```
 
-Why presigned: 5 GB files never go through the API process; the FastAPI container only handles small JSON requests.
+### Multipart (> 5 GB)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant A as FastAPI
+  participant S as MinIO
+  C->>A: POST /api/files
+  A->>S: CreateMultipartUpload
+  A-->>C: upload_method=multipart, part_size, total_parts
+  loop each part batch
+    C->>A: POST /api/files/{id}/upload-parts
+    A-->>C: presigned PUT URLs per part
+    C->>S: PUT each part
+  end
+  C->>A: POST /api/files/{id}/complete { parts: [{part_number, etag}] }
+  A->>S: CompleteMultipartUpload
+  A-->>C: status=ready
+```
+
+Why presigned: file bytes never go through the API process; the FastAPI container only handles small JSON requests.
 
 ## Endpoints
 
@@ -69,8 +94,9 @@ Auth (public):
 - `GET /api/auth/me` — current user (requires `Authorization: Bearer ...`)
 
 Files (JWT required):
-- `POST /api/files` — request a presigned upload URL
-- `POST /api/files/{file_id}/complete` — finalize upload, sets status=ready
+- `POST /api/files` — start upload (single PUT or multipart, based on size)
+- `POST /api/files/{file_id}/upload-parts` — presigned URLs for multipart part numbers
+- `POST /api/files/{file_id}/complete` — finalize upload (`parts` required for multipart)
 - `GET /api/files` — list current user's files
 - `GET /api/files/{file_id}` — metadata
 - `GET /api/files/{file_id}/download` — presigned GET URL
@@ -225,7 +251,6 @@ For production, lock the API's CORS origins to your real domain (see `app/main.p
 
 ## Roadmap (out of MVP)
 
-- Multipart upload (>5 GB single object)
 - Refresh tokens / token rotation
 - Antivirus / content scanning
 - Per-user quotas + usage analytics

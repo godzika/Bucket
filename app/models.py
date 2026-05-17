@@ -21,6 +21,40 @@ class User(Base):
     )
 
     files: Mapped[list["StoredFile"]] = relationship(back_populates="owner")
+    folders: Mapped[list["Folder"]] = relationship(back_populates="owner")
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("folders.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_lower: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    is_root: Mapped[bool] = mapped_column(nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    owner: Mapped[User] = relationship(back_populates="folders")
+    parent: Mapped["Folder | None"] = relationship(
+        remote_side="Folder.id", back_populates="children"
+    )
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent")
+    files: Mapped[list["StoredFile"]] = relationship(back_populates="parent_folder")
 
 
 class StoredFile(Base):
@@ -35,18 +69,26 @@ class StoredFile(Base):
         nullable=False,
         index=True,
     )
+    parent_folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("folders.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     object_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     # pending | ready | failed
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    multipart_upload_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner: Mapped[User] = relationship(back_populates="files")
+    parent_folder: Mapped["Folder | None"] = relationship(back_populates="files")
     shares: Mapped[list["ShareLink"]] = relationship(
         back_populates="file", cascade="all, delete-orphan"
     )

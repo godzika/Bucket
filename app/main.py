@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import auth, files, public, shares
+from app.routers import auth, files, filesystem, public, shares
 from app.storage import ensure_bucket
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
+    app.include_router(filesystem.router)
     app.include_router(files.router)
     app.include_router(shares.router)
     app.include_router(public.router)

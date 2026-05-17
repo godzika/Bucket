@@ -29,8 +29,13 @@ class Settings(BaseSettings):
     s3_secret_key: str
     s3_bucket: str
 
-    # 5 GB default
-    max_file_bytes: int = 5 * 1024 * 1024 * 1024
+    # Single PUT is limited to 5 GB on S3-compatible stores; larger files use multipart.
+    single_put_max_bytes: int = 5 * 1024 * 1024 * 1024
+    # S3 object maximum (5 TiB).
+    max_file_bytes: int = 5 * 1024 * 1024 * 1024 * 1024
+    # 64 MiB parts (S3 minimum part size is 5 MiB except the last part).
+    multipart_part_size_bytes: int = 64 * 1024 * 1024
+    multipart_part_presign_batch: int = 32
     presign_put_ttl_seconds: int = 3600
     presign_get_ttl_seconds: int = 900
 
