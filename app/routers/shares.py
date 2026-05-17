@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, get_owned_file
 from app.models import ShareLink, StoredFile, User
 from app.schemas import ShareCreateIn, ShareOut
 from app.security import hash_password
@@ -29,12 +29,6 @@ def _to_share_out(share: ShareLink) -> ShareOut:
     )
 
 
-async def _get_owned_file(file_id: uuid.UUID, user: User, db: AsyncSession) -> StoredFile:
-    record = await db.get(StoredFile, file_id)
-    if record is None or record.owner_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-    return record
-
 
 @router.post("", response_model=ShareOut, status_code=status.HTTP_201_CREATED)
 async def create_share(
@@ -43,7 +37,7 @@ async def create_share(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ShareOut:
-    file_record = await _get_owned_file(file_id, current, db)
+    file_record = await get_owned_file(file_id, current, db)
     if file_record.status != "ready":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -70,7 +64,7 @@ async def list_shares(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ShareOut]:
-    await _get_owned_file(file_id, current, db)
+    await get_owned_file(file_id, current, db)
     result = await db.execute(
         select(ShareLink)
         .where(ShareLink.file_id == file_id)
@@ -86,7 +80,7 @@ async def delete_share(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _get_owned_file(file_id, current, db)
+    await get_owned_file(file_id, current, db)
     result = await db.execute(
         select(ShareLink).where(ShareLink.file_id == file_id, ShareLink.token == token)
     )

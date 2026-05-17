@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, get_owned_file
 from app.filesystem import resolve_parent_folder
 from app.models import StoredFile, User
 from app.schemas import (
@@ -90,7 +90,8 @@ async def create_file(
     )
 
     if multipart:
-        upload_id = create_multipart_upload(
+        upload_id = await asyncio.to_thread(
+            create_multipart_upload,
             object_key=object_key,
             content_type=payload.content_type,
         )
@@ -110,9 +111,10 @@ async def create_file(
     await db.commit()
 
     public_endpoint = resolve_public_endpoint_url(request)
-    presigned = presigned_put(
-        object_key=object_key,
-        content_type=payload.content_type,
+    presigned = await asyncio.to_thread(
+        presigned_put,
+        object_key,
+        payload.content_type,
         public_endpoint_url=public_endpoint,
     )
     return FileCreateOut(
@@ -214,9 +216,10 @@ async def create_files_batch(
             )
             continue
 
-        presigned = presigned_put(
-            object_key=record.object_key,
-            content_type=record.content_type,
+        presigned = await asyncio.to_thread(
+            presigned_put,
+            record.object_key,
+            record.content_type,
             public_endpoint_url=public_endpoint,
         )
         outputs.append(
@@ -233,13 +236,6 @@ async def create_files_batch(
     return FileBatchCreateOut(items=outputs)
 
 
-async def _get_owned_file(file_id: uuid.UUID, user: User, db: AsyncSession) -> StoredFile:
-    record = await db.get(StoredFile, file_id)
-    if record is None or record.owner_id != user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-    return record
-
-
 @router.post("/{file_id}/upload-parts", response_model=UploadPartsPresignOut)
 async def presign_upload_parts(
     file_id: uuid.UUID,
@@ -249,7 +245,7 @@ async def presign_upload_parts(
     db: AsyncSession = Depends(get_db),
 ) -> UploadPartsPresignOut:
     settings = get_settings()
-    record = await _get_owned_file(file_id, current, db)
+    record = await get_owned_file(file_id, current, db)
     if record.multipart_upload_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -277,7 +273,8 @@ async def presign_upload_parts(
     public_endpoint = resolve_public_endpoint_url(request)
     parts: list[UploadPartPresignOut] = []
     for part_number in sorted(payload.part_numbers):
-        presigned = presigned_upload_part(
+        presigned = await asyncio.to_thread(
+            presigned_upload_part,
             object_key=record.object_key,
             upload_id=record.multipart_upload_id,
             part_number=part_number,
@@ -336,7 +333,7 @@ async def complete_upload(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StoredFile:
-    record = await _get_owned_file(file_id, current, db)
+    record = await get_owned_file(file_id, current, db)
     settings = get_settings()
 
     if record.multipart_upload_id is not None:
@@ -348,20 +345,21 @@ async def complete_upload(
         s3_parts = _validate_multipart_parts(record, payload.parts)
         upload_id = record.multipart_upload_id
         try:
-            complete_multipart_upload(
+            await asyncio.to_thread(
+                complete_multipart_upload,
                 object_key=record.object_key,
                 upload_id=upload_id,
                 parts=s3_parts,
             )
         except Exception:
             try:
-                abort_multipart_upload(record.object_key, upload_id)
+                await asyncio.to_thread(abort_multipart_upload, record.object_key, upload_id)
             except Exception as abort_exc:  # pragma: no cover
                 logger.warning("Failed to abort multipart upload %s: %s", upload_id, abort_exc)
             raise
         record.multipart_upload_id = None
     else:
-        head = head_object(record.object_key)
+        head = await asyncio.to_thread(head_object, record.object_key)
         if head is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -369,7 +367,7 @@ async def complete_upload(
             )
         actual_size = int(head.get("ContentLength", 0))
         if actual_size > settings.single_put_max_bytes:
-            delete_object(record.object_key)
+            await asyncio.to_thread(delete_object, record.object_key)
             await db.delete(record)
             await db.commit()
             raise HTTPException(
@@ -381,7 +379,8 @@ async def complete_upload(
             )
         record.size_bytes = actual_size
 
-    head = head_object(record.object_key)
+    # Single post-completion HEAD to verify the object landed and check final size.
+    head = await asyncio.to_thread(head_object, record.object_key)
     if head is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -389,7 +388,7 @@ async def complete_upload(
         )
     actual_size = int(head.get("ContentLength", 0))
     if actual_size > settings.max_file_bytes:
-        delete_object(record.object_key)
+        await asyncio.to_thread(delete_object, record.object_key)
         await db.delete(record)
         await db.commit()
         raise HTTPException(
@@ -429,7 +428,7 @@ async def get_file(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StoredFile:
-    return await _get_owned_file(file_id, current, db)
+    return await get_owned_file(file_id, current, db)
 
 
 @router.get("/{file_id}/download", response_model=FileDownloadOut)
@@ -439,13 +438,14 @@ async def download_file(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> FileDownloadOut:
-    record = await _get_owned_file(file_id, current, db)
+    record = await get_owned_file(file_id, current, db)
     if record.status != "ready":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="File is not ready yet. Call /complete after uploading.",
         )
-    presigned = presigned_get(
+    presigned = await asyncio.to_thread(
+        presigned_get,
         record.object_key,
         download_filename=record.original_filename,
         public_endpoint_url=resolve_public_endpoint_url(request),
@@ -459,7 +459,7 @@ async def delete_file(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    record = await _get_owned_file(file_id, current, db)
+    record = await get_owned_file(file_id, current, db)
     object_key = record.object_key
     multipart_upload_id = record.multipart_upload_id
 
@@ -468,12 +468,12 @@ async def delete_file(
 
     if multipart_upload_id:
         try:
-            abort_multipart_upload(object_key, multipart_upload_id)
+            await asyncio.to_thread(abort_multipart_upload, object_key, multipart_upload_id)
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to abort multipart upload %s: %s", multipart_upload_id, exc)
         return
 
     try:
-        delete_object(object_key)
+        await asyncio.to_thread(delete_object, object_key)
     except Exception as exc:  # pragma: no cover
         logger.warning("Failed to delete object %s: %s", object_key, exc)

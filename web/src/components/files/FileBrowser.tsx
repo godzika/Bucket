@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Download,
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Pencil,
   Share2,
   Trash2,
 } from "lucide-react";
@@ -12,6 +13,7 @@ import { toast } from "sonner";
 
 import { iconForContentType } from "./FileIcon";
 import { FolderBreadcrumbs } from "./FolderBreadcrumbs";
+import { FolderNameDialog } from "./FolderNameDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,7 +23,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCreateFolder, useDeleteFolder, useFilesystemList } from "@/hooks/useFilesystem";
+import { useCreateFolder, useDeleteFolder, useFilesystemList, useRenameFolder } from "@/hooks/useFilesystem";
 import { startDownload, useDeleteFile, useDeleteFiles } from "@/hooks/useFiles";
 import type { Folder as FolderType } from "@/lib/api/filesystem";
 import type { StoredFile } from "@/lib/api/files";
@@ -40,15 +42,23 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
   const listing = useFilesystemList(folderId);
   const createFolder = useCreateFolder(listing.data?.folder_id);
   const deleteFolder = useDeleteFolder();
+  const renameFolder = useRenameFolder();
   const deleteFile = useDeleteFile();
   const deleteFiles = useDeleteFiles();
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
 
+  // Dialog state
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [renamingFolder, setRenamingFolder] = useState<FolderType | null>(null);
+
   const data = listing.data;
   const folders = data?.folders ?? [];
   const files = data?.files ?? [];
-  const fileIds = files.map((f) => f.id);
+
+  // Stable reference: only recompute when actual IDs change, not every render
+  const fileIds = useMemo(() => files.map((f) => f.id), [files]);
+
   const selectedCount = selectedFileIds.size;
   const allSelected = files.length > 0 && selectedCount === files.length;
   const someSelected = selectedCount > 0 && !allSelected;
@@ -80,13 +90,28 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
     setSelectedFileIds(checked ? new Set(fileIds) : new Set());
   }
 
-  async function onNewFolder() {
-    const name = window.prompt("New folder name");
-    if (!name?.trim()) return;
-    createFolder.mutate(name.trim(), {
-      onSuccess: () => toast.success("Folder created"),
+  function onNewFolder(name: string) {
+    createFolder.mutate(name, {
+      onSuccess: () => {
+        toast.success("Folder created");
+        setCreateDialogOpen(false);
+      },
       onError: (err) => toast.error(apiErrorMessage(err, "Could not create folder")),
     });
+  }
+
+  function onRenameFolderSubmit(name: string) {
+    if (!renamingFolder) return;
+    renameFolder.mutate(
+      { folderId: renamingFolder.id, name },
+      {
+        onSuccess: () => {
+          toast.success("Folder renamed");
+          setRenamingFolder(null);
+        },
+        onError: (err) => toast.error(apiErrorMessage(err, "Could not rename folder")),
+      },
+    );
   }
 
   function onOpenFolder(folder: FolderType) {
@@ -161,7 +186,7 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
           variant="outline"
           size="sm"
           disabled={createFolder.isPending || listing.isLoading}
-          onClick={onNewFolder}
+          onClick={() => setCreateDialogOpen(true)}
         >
           <Folder className="mr-2 h-4 w-4" />
           New folder
@@ -222,6 +247,7 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
                     key={folder.id}
                     folder={folder}
                     onOpen={onOpenFolder}
+                    onRename={setRenamingFolder}
                     onDelete={onDeleteFolderItem}
                   />
                 ))}
@@ -240,6 +266,29 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
           </div>
         </div>
       )}
+
+      {/* Create folder dialog */}
+      <FolderNameDialog
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+        title="New folder"
+        description="Enter a name for the new folder."
+        submitLabel="Create"
+        isLoading={createFolder.isPending}
+        onSubmit={onNewFolder}
+      />
+
+      {/* Rename folder dialog */}
+      <FolderNameDialog
+        open={renamingFolder !== null}
+        onOpenChange={(open) => { if (!open) setRenamingFolder(null); }}
+        title="Rename folder"
+        description={renamingFolder ? `Rename "${renamingFolder.name}"` : undefined}
+        defaultValue={renamingFolder?.name ?? ""}
+        submitLabel="Rename"
+        isLoading={renameFolder.isPending}
+        onSubmit={onRenameFolderSubmit}
+      />
     </div>
   );
 }
@@ -247,10 +296,12 @@ export function FileBrowser({ folderId, onNavigateFolder }: Props) {
 function FolderRow({
   folder,
   onOpen,
+  onRename,
   onDelete,
 }: {
   folder: FolderType;
   onOpen: (folder: FolderType) => void;
+  onRename: (folder: FolderType) => void;
   onDelete: (folder: FolderType) => void;
 }) {
   return (
@@ -285,6 +336,10 @@ function FolderRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => onRename(folder)}>
+              <Pencil className="h-4 w-4" />
+              Rename
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive focus:text-destructive"
               onSelect={() => onDelete(folder)}

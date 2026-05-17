@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,6 +26,9 @@ class User(Base):
 
 class Folder(Base):
     __tablename__ = "folders"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "parent_id", "name_lower", name="uq_folder_name_per_parent"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
