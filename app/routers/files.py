@@ -367,9 +367,13 @@ async def complete_upload(
             )
         actual_size = int(head.get("ContentLength", 0))
         if actual_size > settings.single_put_max_bytes:
-            await asyncio.to_thread(delete_object, record.object_key)
+            object_key = record.object_key
             await db.delete(record)
             await db.commit()
+            try:
+                await asyncio.to_thread(delete_object, object_key)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Failed to delete object %s: %s", object_key, exc)
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=(
@@ -388,9 +392,13 @@ async def complete_upload(
         )
     actual_size = int(head.get("ContentLength", 0))
     if actual_size > settings.max_file_bytes:
-        await asyncio.to_thread(delete_object, record.object_key)
+        object_key = record.object_key
         await db.delete(record)
         await db.commit()
+        try:
+            await asyncio.to_thread(delete_object, object_key)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to delete object %s: %s", object_key, exc)
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="Uploaded object exceeds the configured size limit.",

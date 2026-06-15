@@ -1,7 +1,48 @@
-import httpx
+import uuid
+
 import pytest
 
-from app.config import get_settings
+from app import filesystem as filesystem_module
+from app.models import Folder, StoredFile
+
+
+class _ScalarResult:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class _Result:
+    def __init__(self, *, scalars=None, rows=None):
+        self._scalars = scalars or []
+        self._rows = rows or []
+
+    def scalars(self):
+        return _ScalarResult(self._scalars)
+
+    def all(self):
+        return self._rows
+
+
+class _CommitFailingDb:
+    def __init__(self, files):
+        self.files = files
+        self.deleted = []
+        self.execute_count = 0
+
+    async def execute(self, _stmt):
+        self.execute_count += 1
+        if self.execute_count == 1:
+            return _Result(scalars=self.files)
+        return _Result()
+
+    async def delete(self, obj):
+        self.deleted.append(obj)
+
+    async def commit(self):
+        raise RuntimeError("commit failed")
 
 
 async def _register_and_login(client, email: str, password: str = "secret12345") -> str:
@@ -11,6 +52,47 @@ async def _register_and_login(client, email: str, password: str = "secret12345")
         data={"username": email, "password": password},
     )
     return r.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_tree_does_not_delete_storage_before_commit(monkeypatch):
+    owner_id = uuid.uuid4()
+    folder_id = uuid.uuid4()
+    folder = Folder(
+        id=folder_id,
+        owner_id=owner_id,
+        parent_id=uuid.uuid4(),
+        name="temp",
+        name_lower="temp",
+        is_root=False,
+    )
+    file_record = StoredFile(
+        id=uuid.uuid4(),
+        owner_id=owner_id,
+        parent_folder_id=folder_id,
+        object_key="users/test/file.txt",
+        original_filename="file.txt",
+        content_type="text/plain",
+        size_bytes=1,
+        status="ready",
+    )
+    db = _CommitFailingDb([file_record])
+    deleted_objects = []
+
+    async def collect_folder_ids(_db, root_id):
+        return [root_id]
+
+    def delete_object(object_key):
+        deleted_objects.append(object_key)
+
+    monkeypatch.setattr(filesystem_module, "_collect_folder_ids_cte", collect_folder_ids)
+    monkeypatch.setattr(filesystem_module, "delete_object", delete_object)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await filesystem_module.delete_folder_tree(db, folder)
+
+    assert db.deleted == [file_record]
+    assert deleted_objects == []
 
 
 @pytest.mark.asyncio
