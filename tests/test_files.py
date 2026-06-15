@@ -1,7 +1,22 @@
+import uuid
+
 import httpx
 import pytest
 
 from app.config import get_settings
+from app.models import StoredFile, User
+from app.routers import files as files_router
+
+
+class _CommitFailingDb:
+    def __init__(self):
+        self.deleted = []
+
+    async def delete(self, obj):
+        self.deleted.append(obj)
+
+    async def commit(self):
+        raise RuntimeError("commit failed")
 
 
 async def _register_and_login(client, email: str, password: str = "secret12345") -> str:
@@ -11,6 +26,47 @@ async def _register_and_login(client, email: str, password: str = "secret12345")
         data={"username": email, "password": password},
     )
     return r.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_does_not_delete_oversize_object_before_commit(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "single_put_max_bytes", 100)
+    monkeypatch.setattr(settings, "max_file_bytes", 1000)
+
+    owner = User(id=uuid.uuid4(), email="owner@example.com")
+    file_id = uuid.uuid4()
+    record = StoredFile(
+        id=file_id,
+        owner_id=owner.id,
+        parent_folder_id=None,
+        object_key="users/test/large.bin",
+        original_filename="large.bin",
+        content_type="application/octet-stream",
+        size_bytes=100,
+        status="pending",
+    )
+    db = _CommitFailingDb()
+    deleted_objects = []
+
+    async def get_owned_file(_file_id, _current, _db):
+        return record
+
+    def head_object(_object_key):
+        return {"ContentLength": 101}
+
+    def delete_object(object_key):
+        deleted_objects.append(object_key)
+
+    monkeypatch.setattr(files_router, "get_owned_file", get_owned_file)
+    monkeypatch.setattr(files_router, "head_object", head_object)
+    monkeypatch.setattr(files_router, "delete_object", delete_object)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await files_router.complete_upload(file_id, current=owner, db=db)
+
+    assert db.deleted == [record]
+    assert deleted_objects == []
 
 
 @pytest.mark.asyncio

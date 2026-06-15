@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Sequence
 
@@ -13,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Folder, StoredFile, User
 from app.storage import abort_multipart_upload, delete_object
+
+logger = logging.getLogger(__name__)
 
 ROOT_DISPLAY_NAME = "My files"
 
@@ -240,24 +243,28 @@ async def delete_folder_tree(db: AsyncSession, folder: Folder) -> None:
         select(StoredFile).where(StoredFile.parent_folder_id.in_(folder_ids))
     )
     files = list(files_result.scalars().all())
+    cleanup_targets = [
+        (record.object_key, record.multipart_upload_id)
+        for record in files
+    ]
 
     for record in files:
-        object_key = record.object_key
-        multipart_upload_id = record.multipart_upload_id
         await db.delete(record)
-        if multipart_upload_id:
-            try:
-                await asyncio.to_thread(abort_multipart_upload, object_key, multipart_upload_id)
-            except Exception:
-                pass
-        else:
-            try:
-                await asyncio.to_thread(delete_object, object_key)
-            except Exception:
-                pass
 
     await db.execute(delete(Folder).where(Folder.id.in_(folder_ids)))
     await db.commit()
+
+    for object_key, multipart_upload_id in cleanup_targets:
+        if multipart_upload_id is not None:
+            try:
+                await asyncio.to_thread(abort_multipart_upload, object_key, multipart_upload_id)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Failed to abort multipart upload %s: %s", multipart_upload_id, exc)
+        else:
+            try:
+                await asyncio.to_thread(delete_object, object_key)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Failed to delete object %s: %s", object_key, exc)
 
 
 async def count_folder_children(db: AsyncSession, folder_id: uuid.UUID) -> tuple[int, int]:
