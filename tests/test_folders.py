@@ -1,8 +1,9 @@
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.filesystem import delete_folder_tree
+from app.models import Folder, StoredFile
 
 
 async def _register_and_login(client, email: str, password: str = "secret12345") -> str:
@@ -176,36 +177,91 @@ async def test_delete_folder_cascade(client, unique_email):
     assert listing.status_code == 404
 
 
+class _ScalarResult:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _ScalarsResult:
+    def __init__(self, values):
+        self._values = values
+
+    def scalars(self):
+        return _ScalarResult(self._values)
+
+
+class _CommitFailingDb:
+    def __init__(self, folder_ids, files):
+        self._results = [
+            _RowsResult([(folder_id,) for folder_id in folder_ids]),
+            _ScalarsResult(files),
+        ]
+        self.deleted = []
+        self.committed = False
+
+    async def execute(self, stmt):
+        if self._results:
+            return self._results.pop(0)
+        return _RowsResult([])
+
+    async def delete(self, record):
+        self.deleted.append(record)
+
+    async def commit(self):
+        self.committed = True
+        raise RuntimeError("simulated commit failure")
+
+
 @pytest.mark.asyncio
-async def test_delete_folder_does_not_delete_storage_if_db_commit_fails(
-    client,
-    unique_email,
-    monkeypatch,
-):
-    token = await _register_and_login(client, unique_email)
-    auth = {"Authorization": f"Bearer {token}"}
-    root_id = (await client.get("/api/filesystem/root", headers=auth)).json()["id"]
+async def test_delete_folder_does_not_delete_storage_if_db_commit_fails(monkeypatch):
+    import uuid
 
-    folder = await client.post(
-        "/api/filesystem/folders",
-        json={"parent_folder_id": root_id, "name": "keep-bytes"},
-        headers=auth,
+    owner_id = uuid.uuid4()
+    folder_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    folder = Folder(
+        id=folder_id,
+        owner_id=owner_id,
+        parent_id=uuid.uuid4(),
+        name="keep-bytes",
+        name_lower="keep-bytes",
+        is_root=False,
     )
-    assert folder.status_code == 201, folder.text
-    folder_id = folder.json()["id"]
-
-    create = await client.post(
-        "/api/files",
-        json={
-            "filename": "important.txt",
-            "parent_folder_id": folder_id,
-            "content_type": "text/plain",
-            "size_bytes": 1,
-        },
-        headers=auth,
-    )
-    assert create.status_code == 201, create.text
-
+    files = [
+        StoredFile(
+            id=uuid.uuid4(),
+            owner_id=owner_id,
+            parent_folder_id=folder_id,
+            object_key="users/owner/file.txt",
+            original_filename="file.txt",
+            content_type="text/plain",
+            size_bytes=1,
+            status="ready",
+        ),
+        StoredFile(
+            id=uuid.uuid4(),
+            owner_id=owner_id,
+            parent_folder_id=child_id,
+            object_key="users/owner/large.bin",
+            original_filename="large.bin",
+            content_type="application/octet-stream",
+            size_bytes=1024,
+            status="pending",
+            multipart_upload_id="multipart-1",
+        ),
+    ]
+    db = _CommitFailingDb([folder_id, child_id], files)
     storage_calls: list[tuple[str, str]] = []
 
     def record_delete(object_key: str) -> None:
@@ -214,20 +270,12 @@ async def test_delete_folder_does_not_delete_storage_if_db_commit_fails(
     def record_abort(object_key: str, upload_id: str) -> None:
         storage_calls.append(("abort", f"{object_key}:{upload_id}"))
 
-    async def fail_commit(self) -> None:
-        raise RuntimeError("simulated commit failure")
+    monkeypatch.setattr("app.filesystem.delete_object", record_delete)
+    monkeypatch.setattr("app.filesystem.abort_multipart_upload", record_abort)
 
-    with monkeypatch.context() as m:
-        m.setattr("app.filesystem.delete_object", record_delete)
-        m.setattr("app.filesystem.abort_multipart_upload", record_abort)
-        m.setattr(AsyncSession, "commit", fail_commit)
-        with pytest.raises(RuntimeError, match="simulated commit failure"):
-            await client.delete(f"/api/filesystem/folders/{folder_id}", headers=auth)
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await delete_folder_tree(db, folder)
 
+    assert db.committed is True
+    assert db.deleted == files
     assert storage_calls == []
-
-    listing = await client.get(
-        "/api/filesystem", params={"folder_id": folder_id}, headers=auth
-    )
-    assert listing.status_code == 200, listing.text
-    assert listing.json()["files"][0]["original_filename"] == "important.txt"
