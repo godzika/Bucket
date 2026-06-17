@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 
@@ -173,3 +174,60 @@ async def test_delete_folder_cascade(client, unique_email):
         "/api/filesystem", params={"folder_id": folder_id}, headers=auth
     )
     assert listing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_does_not_delete_storage_if_db_commit_fails(
+    client,
+    unique_email,
+    monkeypatch,
+):
+    token = await _register_and_login(client, unique_email)
+    auth = {"Authorization": f"Bearer {token}"}
+    root_id = (await client.get("/api/filesystem/root", headers=auth)).json()["id"]
+
+    folder = await client.post(
+        "/api/filesystem/folders",
+        json={"parent_folder_id": root_id, "name": "keep-bytes"},
+        headers=auth,
+    )
+    assert folder.status_code == 201, folder.text
+    folder_id = folder.json()["id"]
+
+    create = await client.post(
+        "/api/files",
+        json={
+            "filename": "important.txt",
+            "parent_folder_id": folder_id,
+            "content_type": "text/plain",
+            "size_bytes": 1,
+        },
+        headers=auth,
+    )
+    assert create.status_code == 201, create.text
+
+    storage_calls: list[tuple[str, str]] = []
+
+    def record_delete(object_key: str) -> None:
+        storage_calls.append(("delete", object_key))
+
+    def record_abort(object_key: str, upload_id: str) -> None:
+        storage_calls.append(("abort", f"{object_key}:{upload_id}"))
+
+    async def fail_commit(self) -> None:
+        raise RuntimeError("simulated commit failure")
+
+    with monkeypatch.context() as m:
+        m.setattr("app.filesystem.delete_object", record_delete)
+        m.setattr("app.filesystem.abort_multipart_upload", record_abort)
+        m.setattr(AsyncSession, "commit", fail_commit)
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            await client.delete(f"/api/filesystem/folders/{folder_id}", headers=auth)
+
+    assert storage_calls == []
+
+    listing = await client.get(
+        "/api/filesystem", params={"folder_id": folder_id}, headers=auth
+    )
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["files"][0]["original_filename"] == "important.txt"
