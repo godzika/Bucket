@@ -23,7 +23,6 @@ from app.models import Folder, StoredFile, User
 from app.schemas import (
     BreadcrumbOut,
     FilesystemListOut,
-    FileOut,
     FolderCreateIn,
     FolderEnsurePathsIn,
     FolderEnsurePathsOut,
