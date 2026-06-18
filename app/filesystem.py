@@ -77,6 +77,15 @@ async def get_owned_folder(
     return folder
 
 
+async def lock_user_folders(db: AsyncSession, user_id: uuid.UUID) -> None:
+    await db.execute(
+        select(Folder.id)
+        .where(Folder.owner_id == user_id)
+        .order_by(Folder.id)
+        .with_for_update()
+    )
+
+
 async def resolve_parent_folder(
     db: AsyncSession,
     user: User,

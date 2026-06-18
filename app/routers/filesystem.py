@@ -15,6 +15,7 @@ from app.filesystem import (
     get_owned_folder,
     get_user_root,
     is_descendant_folder,
+    lock_user_folders,
     normalize_folder_name,
     resolve_parent_folder,
 )
@@ -150,6 +151,9 @@ async def update_folder(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Folder:
+    if payload.parent_folder_id is not None:
+        await lock_user_folders(db, current.id)
+
     folder = await get_owned_folder(db, folder_id, current)
     if folder.is_root:
         raise HTTPException(
@@ -193,6 +197,7 @@ async def delete_folder(
     current: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    await lock_user_folders(db, current.id)
     folder = await get_owned_folder(db, folder_id, current)
     await delete_folder_tree(db, folder)
 
