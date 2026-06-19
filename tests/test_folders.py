@@ -1,9 +1,7 @@
 import uuid
 
-import httpx
 import pytest
 
-from app.config import get_settings
 from app.filesystem import delete_folder_tree
 from app.models import Folder, StoredFile
 
