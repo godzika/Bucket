@@ -349,10 +349,31 @@ export class UploadQueue {
     this.markDirty();
 
     try {
-      const folderIds = await ensureFolderPaths(
-        batch[0]?.targetParentFolderId ?? this.baseFolderId,
-        batch.map((e) => e.folderSegments)
-      );
+      const folderIds = new Array<string>(batch.length);
+      const groups = new Map<
+        string | null,
+        { parentFolderId: string | null; items: Array<{ entry: InternalEntry; index: number }> }
+      >();
+      batch.forEach((entry, index) => {
+        const parentFolderId = entry.targetParentFolderId;
+        const group = groups.get(parentFolderId);
+        if (group) {
+          group.items.push({ entry, index });
+          return;
+        }
+        groups.set(parentFolderId, { parentFolderId, items: [{ entry, index }] });
+      });
+
+      for (const group of groups.values()) {
+        const resolvedIds = await ensureFolderPaths(
+          group.parentFolderId,
+          group.items.map(({ entry }) => entry.folderSegments)
+        );
+        group.items.forEach(({ index }, resolvedIndex) => {
+          folderIds[index] = resolvedIds[resolvedIndex];
+        });
+      }
+
       const results = await createFilesBatch(
         batch.map((e, index) => ({
           filename: e.basename,
