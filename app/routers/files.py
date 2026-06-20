@@ -50,6 +50,14 @@ def _uses_multipart(size_bytes: int) -> bool:
     return size_bytes > settings.single_put_max_bytes
 
 
+async def _abort_started_multipart_uploads(upload_ids: list[tuple[str, str]]) -> None:
+    for object_key, upload_id in upload_ids:
+        try:
+            await asyncio.to_thread(abort_multipart_upload, object_key, upload_id)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to abort multipart upload %s: %s", upload_id, exc)
+
+
 @router.post("", response_model=FileCreateOut, status_code=status.HTTP_201_CREATED)
 async def create_file(
     payload: FileCreateIn,
@@ -90,14 +98,21 @@ async def create_file(
     )
 
     if multipart:
-        upload_id = await asyncio.to_thread(
-            create_multipart_upload,
-            object_key=object_key,
-            content_type=payload.content_type,
-        )
-        record.multipart_upload_id = upload_id
-        db.add(record)
-        await db.commit()
+        started_uploads: list[tuple[str, str]] = []
+        try:
+            upload_id = await asyncio.to_thread(
+                create_multipart_upload,
+                object_key=object_key,
+                content_type=payload.content_type,
+            )
+            started_uploads.append((object_key, upload_id))
+            record.multipart_upload_id = upload_id
+            db.add(record)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            await _abort_started_multipart_uploads(started_uploads)
+            raise
         return FileCreateOut(
             file_id=file_id,
             object_key=object_key,
@@ -107,9 +122,6 @@ async def create_file(
             total_parts=part_count,
         )
 
-    db.add(record)
-    await db.commit()
-
     public_endpoint = resolve_public_endpoint_url(request)
     presigned = await asyncio.to_thread(
         presigned_put,
@@ -117,6 +129,8 @@ async def create_file(
         payload.content_type,
         public_endpoint_url=public_endpoint,
     )
+    db.add(record)
+    await db.commit()
     return FileCreateOut(
         file_id=file_id,
         object_key=object_key,
@@ -180,58 +194,67 @@ async def create_files_batch(
         if multipart and part_count is not None:
             multipart_meta.append((record, part_count))
 
-    if multipart_meta:
+    started_uploads: list[tuple[str, str]] = []
 
-        async def _start_multipart(rec: StoredFile) -> str:
-            return await asyncio.to_thread(
-                create_multipart_upload,
-                object_key=rec.object_key,
-                content_type=rec.content_type,
+    try:
+        if multipart_meta:
+
+            async def _start_multipart(rec: StoredFile) -> str:
+                upload_id = await asyncio.to_thread(
+                    create_multipart_upload,
+                    object_key=rec.object_key,
+                    content_type=rec.content_type,
+                )
+                started_uploads.append((rec.object_key, upload_id))
+                return upload_id
+
+            upload_ids = await asyncio.gather(
+                *[_start_multipart(rec) for rec, _ in multipart_meta]
             )
+            for (rec, _), upload_id in zip(multipart_meta, upload_ids, strict=True):
+                rec.multipart_upload_id = upload_id
 
-        upload_ids = await asyncio.gather(
-            *[_start_multipart(rec) for rec, _ in multipart_meta]
-        )
-        for (rec, _), upload_id in zip(multipart_meta, upload_ids, strict=True):
-            rec.multipart_upload_id = upload_id
+        outputs: list[FileCreateOut] = []
+        multipart_by_id = {rec.id: part_count for rec, part_count in multipart_meta}
 
-    db.add_all(records)
-    await db.commit()
+        for record in records:
+            if record.multipart_upload_id is not None:
+                part_count = multipart_by_id[record.id]
+                outputs.append(
+                    FileCreateOut(
+                        file_id=record.id,
+                        object_key=record.object_key,
+                        upload_method="multipart",
+                        expires_in=settings.presign_put_ttl_seconds,
+                        part_size_bytes=settings.multipart_part_size_bytes,
+                        total_parts=part_count,
+                    )
+                )
+                continue
 
-    outputs: list[FileCreateOut] = []
-    multipart_by_id = {rec.id: part_count for rec, part_count in multipart_meta}
-
-    for record in records:
-        if record.multipart_upload_id is not None:
-            part_count = multipart_by_id[record.id]
+            presigned = await asyncio.to_thread(
+                presigned_put,
+                record.object_key,
+                record.content_type,
+                public_endpoint_url=public_endpoint,
+            )
             outputs.append(
                 FileCreateOut(
                     file_id=record.id,
                     object_key=record.object_key,
-                    upload_method="multipart",
-                    expires_in=settings.presign_put_ttl_seconds,
-                    part_size_bytes=settings.multipart_part_size_bytes,
-                    total_parts=part_count,
+                    upload_method="PUT",
+                    upload_url=presigned["url"],
+                    upload_headers=presigned["headers"],
+                    expires_in=presigned["expires_in"],
                 )
             )
-            continue
 
-        presigned = await asyncio.to_thread(
-            presigned_put,
-            record.object_key,
-            record.content_type,
-            public_endpoint_url=public_endpoint,
-        )
-        outputs.append(
-            FileCreateOut(
-                file_id=record.id,
-                object_key=record.object_key,
-                upload_method="PUT",
-                upload_url=presigned["url"],
-                upload_headers=presigned["headers"],
-                expires_in=presigned["expires_in"],
-            )
-        )
+        db.add_all(records)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await _abort_started_multipart_uploads(started_uploads)
+        raise
 
     return FileBatchCreateOut(items=outputs)
 

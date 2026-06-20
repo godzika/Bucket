@@ -68,6 +68,7 @@ interface InternalEntry {
   createOut: FileCreateResponse | null;
   abortController: AbortController | null;
   bytesUploaded: number;
+  cleanupStarted: boolean;
 }
 
 let nextId = 0;
@@ -145,6 +146,7 @@ export class UploadQueue {
         createOut: null,
         abortController: null,
         bytesUploaded: 0,
+        cleanupStarted: false,
       });
       added += 1;
     }
@@ -179,9 +181,13 @@ export class UploadQueue {
   cancel(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
+    if (entry.status === "done" || entry.status === "error" || entry.status === "cancelled") {
+      return;
+    }
     entry.abortController?.abort();
     entry.status = "cancelled";
     entry.error = null;
+    void this.cleanupEntryFile(entry);
     this.markDirty();
   }
 
@@ -195,6 +201,7 @@ export class UploadQueue {
     entry.createOut = null;
     entry.fileId = null;
     entry.abortController = null;
+    entry.cleanupStarted = false;
     this.markDirty();
     void this.ensurePump();
   }
@@ -342,7 +349,10 @@ export class UploadQueue {
     );
     if (pending.length === 0) return;
 
-    const batch = pending.slice(0, BATCH_CREATE_SIZE);
+    const parentFolderId = pending[0].targetParentFolderId;
+    const batch = pending
+      .filter((entry) => entry.targetParentFolderId === parentFolderId)
+      .slice(0, BATCH_CREATE_SIZE);
     for (const entry of batch) {
       entry.status = "creating";
     }
@@ -350,7 +360,7 @@ export class UploadQueue {
 
     try {
       const folderIds = await ensureFolderPaths(
-        batch[0]?.targetParentFolderId ?? this.baseFolderId,
+        parentFolderId,
         batch.map((e) => e.folderSegments)
       );
       const results = await createFilesBatch(
@@ -365,6 +375,10 @@ export class UploadQueue {
         const entry = batch[i];
         const created = results[i];
         if (!created) continue;
+        if (entry.status === "cancelled") {
+          void this.cleanupEntryFile(entry, created.file_id);
+          continue;
+        }
         entry.createOut = created;
         entry.fileId = created.file_id;
         entry.status = "queued";
@@ -407,6 +421,7 @@ export class UploadQueue {
     try {
       if (signal?.aborted) {
         entry.status = "cancelled";
+        void this.cleanupEntryFile(entry);
         return;
       }
 
@@ -421,6 +436,7 @@ export class UploadQueue {
         const parts = await this.uploadMultipart(entry, created, onProgress, signal);
         if (signal?.aborted) {
           entry.status = "cancelled";
+          void this.cleanupEntryFile(entry);
           return;
         }
         entry.status = "completing";
@@ -431,6 +447,7 @@ export class UploadQueue {
         await this.uploadSinglePut(entry, created, onProgress, signal);
         if (signal?.aborted) {
           entry.status = "cancelled";
+          void this.cleanupEntryFile(entry);
           return;
         }
         entry.status = "completing";
@@ -451,17 +468,10 @@ export class UploadQueue {
           (err.name === "CanceledError" || err.name === "AbortError"))
       ) {
         entry.status = "cancelled";
+        void this.cleanupEntryFile(entry);
         return;
       }
-      const fileId = entry.fileId;
-      if (fileId) {
-        try {
-          await deleteFile(fileId);
-          this.onInvalidate?.();
-        } catch {
-          // best-effort
-        }
-      }
+      await this.cleanupEntryFile(entry);
       const message = apiErrorMessage(err, "Upload failed");
       entry.status = "error";
       entry.error = message.includes("Network Error")
@@ -471,6 +481,21 @@ export class UploadQueue {
     } finally {
       entry.abortController = null;
       this.markDirty();
+    }
+  }
+
+  private cleanupEntryFile(entry: InternalEntry, fileId = entry.fileId): Promise<void> | null {
+    if (!fileId || entry.cleanupStarted) return null;
+    entry.cleanupStarted = true;
+    return this.cleanupServerFile(fileId);
+  }
+
+  private async cleanupServerFile(fileId: string): Promise<void> {
+    try {
+      await deleteFile(fileId);
+      this.onInvalidate?.();
+    } catch {
+      // best-effort
     }
   }
 

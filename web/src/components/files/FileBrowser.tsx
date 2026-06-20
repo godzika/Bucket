@@ -40,7 +40,7 @@ interface Props {
 
 export function FileBrowser({ folderId, onNavigateFolder }: Props) {
   const listing = useFilesystemList(folderId);
-  const createFolder = useCreateFolder(listing.data?.folder_id);
+  const createFolder = useCreateFolder(folderId);
   const deleteFolder = useDeleteFolder();
   const renameFolder = useRenameFolder();
   const deleteFile = useDeleteFile();
