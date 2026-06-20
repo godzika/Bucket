@@ -241,10 +241,17 @@ async def delete_folder_tree(db: AsyncSession, folder: Folder) -> None:
     )
     files = list(files_result.scalars().all())
 
+    storage_cleanup: list[tuple[str, str | None]] = []
     for record in files:
         object_key = record.object_key
         multipart_upload_id = record.multipart_upload_id
+        storage_cleanup.append((object_key, multipart_upload_id))
         await db.delete(record)
+
+    await db.execute(delete(Folder).where(Folder.id.in_(folder_ids)))
+    await db.commit()
+
+    for object_key, multipart_upload_id in storage_cleanup:
         if multipart_upload_id:
             try:
                 await asyncio.to_thread(abort_multipart_upload, object_key, multipart_upload_id)
@@ -255,9 +262,6 @@ async def delete_folder_tree(db: AsyncSession, folder: Folder) -> None:
                 await asyncio.to_thread(delete_object, object_key)
             except Exception:
                 pass
-
-    await db.execute(delete(Folder).where(Folder.id.in_(folder_ids)))
-    await db.commit()
 
 
 async def count_folder_children(db: AsyncSession, folder_id: uuid.UUID) -> tuple[int, int]:
