@@ -77,6 +77,15 @@ async def get_owned_folder(
     return folder
 
 
+async def lock_user_folders(db: AsyncSession, user_id: uuid.UUID) -> None:
+    await db.execute(
+        select(Folder.id)
+        .where(Folder.owner_id == user_id)
+        .order_by(Folder.id)
+        .with_for_update()
+    )
+
+
 async def resolve_parent_folder(
     db: AsyncSession,
     user: User,
@@ -241,10 +250,15 @@ async def delete_folder_tree(db: AsyncSession, folder: Folder) -> None:
     )
     files = list(files_result.scalars().all())
 
+    storage_cleanups = [(record.object_key, record.multipart_upload_id) for record in files]
+
     for record in files:
-        object_key = record.object_key
-        multipart_upload_id = record.multipart_upload_id
         await db.delete(record)
+
+    await db.execute(delete(Folder).where(Folder.id.in_(folder_ids)))
+    await db.commit()
+
+    for object_key, multipart_upload_id in storage_cleanups:
         if multipart_upload_id:
             try:
                 await asyncio.to_thread(abort_multipart_upload, object_key, multipart_upload_id)
@@ -255,9 +269,6 @@ async def delete_folder_tree(db: AsyncSession, folder: Folder) -> None:
                 await asyncio.to_thread(delete_object, object_key)
             except Exception:
                 pass
-
-    await db.execute(delete(Folder).where(Folder.id.in_(folder_ids)))
-    await db.commit()
 
 
 async def count_folder_children(db: AsyncSession, folder_id: uuid.UUID) -> tuple[int, int]:
