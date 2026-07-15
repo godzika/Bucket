@@ -1,3 +1,6 @@
+import uuid
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -173,3 +176,63 @@ async def test_delete_folder_cascade(client, unique_email):
         "/api/filesystem", params={"folder_id": folder_id}, headers=auth
     )
     assert listing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_folder_tree_does_not_cleanup_storage_before_commit(monkeypatch):
+    from app import filesystem
+
+    folder_id = uuid.uuid4()
+    records = [
+        SimpleNamespace(object_key="users/u/file-1/a.txt", multipart_upload_id=None),
+        SimpleNamespace(object_key="users/u/file-2/b.bin", multipart_upload_id="upload-1"),
+    ]
+    deleted_objects: list[str] = []
+    aborted_uploads: list[tuple[str, str]] = []
+
+    async def collect_folder_ids(_db, root_id):
+        return [root_id]
+
+    def delete_object(object_key):
+        deleted_objects.append(object_key)
+
+    def abort_multipart_upload(object_key, upload_id):
+        aborted_uploads.append((object_key, upload_id))
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return records
+
+    class FailingCommitSession:
+        def __init__(self):
+            self.deleted_records = []
+            self.execute_calls = 0
+
+        async def execute(self, _statement):
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return Result()
+            return None
+
+        async def delete(self, record):
+            self.deleted_records.append(record)
+
+        async def commit(self):
+            raise RuntimeError("database commit failed")
+
+    monkeypatch.setattr(filesystem, "_collect_folder_ids_cte", collect_folder_ids)
+    monkeypatch.setattr(filesystem, "delete_object", delete_object)
+    monkeypatch.setattr(filesystem, "abort_multipart_upload", abort_multipart_upload)
+
+    db = FailingCommitSession()
+    folder = SimpleNamespace(id=folder_id, is_root=False)
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        await filesystem.delete_folder_tree(db, folder)
+
+    assert db.deleted_records == records
+    assert deleted_objects == []
+    assert aborted_uploads == []
