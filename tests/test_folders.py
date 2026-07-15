@@ -1,10 +1,7 @@
 import uuid
 from types import SimpleNamespace
 
-import httpx
 import pytest
-
-from app.config import get_settings
 
 
 async def _register_and_login(client, email: str, password: str = "secret12345") -> str:
