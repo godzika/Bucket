@@ -1,3 +1,6 @@
+import uuid
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -269,3 +272,73 @@ async def test_batch_create_other_user_cannot_access(client, unique_email):
         headers={"Authorization": f"Bearer {other_token}"},
     )
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_multipart_complete_recovers_when_storage_finished_despite_error(monkeypatch):
+    from app.routers import files as files_router
+    from app.schemas import FileCompleteIn
+
+    file_id = uuid.uuid4()
+    owner = SimpleNamespace(id=uuid.uuid4())
+    record = SimpleNamespace(
+        id=file_id,
+        object_key=f"users/{owner.id}/{file_id}/large.bin",
+        multipart_upload_id="upload-1",
+        size_bytes=10,
+        status="pending",
+    )
+    aborted_uploads: list[tuple[str, str]] = []
+    head_calls = 0
+
+    async def get_owned_file(_file_id, _owner, _db):
+        return record
+
+    def complete_multipart_upload(**_kwargs):
+        raise RuntimeError("storage response was lost")
+
+    def head_object(_object_key):
+        nonlocal head_calls
+        head_calls += 1
+        return {"ContentLength": 10}
+
+    def abort_multipart_upload(object_key, upload_id):
+        aborted_uploads.append((object_key, upload_id))
+
+    class Session:
+        committed = False
+        refreshed = False
+
+        async def commit(self):
+            self.committed = True
+
+        async def refresh(self, _record):
+            self.refreshed = True
+
+    monkeypatch.setattr(files_router, "get_owned_file", get_owned_file)
+    monkeypatch.setattr(files_router, "get_settings", lambda: SimpleNamespace(max_file_bytes=100))
+    monkeypatch.setattr(
+        files_router,
+        "_validate_multipart_parts",
+        lambda _record, _parts: [{"PartNumber": 1, "ETag": '"etag"'}],
+    )
+    monkeypatch.setattr(files_router, "complete_multipart_upload", complete_multipart_upload)
+    monkeypatch.setattr(files_router, "head_object", head_object)
+    monkeypatch.setattr(files_router, "abort_multipart_upload", abort_multipart_upload)
+
+    db = Session()
+    result = await files_router.complete_upload(
+        file_id,
+        payload=FileCompleteIn(parts=[{"part_number": 1, "etag": "etag"}]),
+        current=owner,
+        db=db,
+    )
+
+    assert result is record
+    assert record.multipart_upload_id is None
+    assert record.status == "ready"
+    assert record.size_bytes == 10
+    assert head_calls == 2
+    assert aborted_uploads == []
+    assert db.committed is True
+    assert db.refreshed is True

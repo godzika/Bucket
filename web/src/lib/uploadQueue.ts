@@ -2,6 +2,7 @@ import {
   completeFile,
   createFilesBatch,
   deleteFile,
+  getFile,
   type FileCreateMultipartResponse,
   type FileCreateResponse,
   type MultipartPartComplete,
@@ -404,6 +405,8 @@ export class UploadQueue {
     const signal = entry.abortController?.signal;
     if (!entry.createOut || !entry.fileId) return;
 
+    let completionAttempted = false;
+
     try {
       if (signal?.aborted) {
         entry.status = "cancelled";
@@ -426,6 +429,7 @@ export class UploadQueue {
         entry.status = "completing";
         entry.progress = 100;
         this.markDirty();
+        completionAttempted = true;
         await completeFile(entry.fileId, parts);
       } else {
         await this.uploadSinglePut(entry, created, onProgress, signal);
@@ -437,6 +441,7 @@ export class UploadQueue {
         entry.progress = 100;
         entry.bytesUploaded = entry.file.size;
         this.markDirty();
+        completionAttempted = true;
         await completeFile(entry.fileId);
       }
 
@@ -453,8 +458,11 @@ export class UploadQueue {
         entry.status = "cancelled";
         return;
       }
+      if (completionAttempted && (await this.recoverCompletedUpload(entry))) {
+        return;
+      }
       const fileId = entry.fileId;
-      if (fileId) {
+      if (fileId && !completionAttempted) {
         try {
           await deleteFile(fileId);
           this.onInvalidate?.();
@@ -471,6 +479,24 @@ export class UploadQueue {
     } finally {
       entry.abortController = null;
       this.markDirty();
+    }
+  }
+
+  private async recoverCompletedUpload(entry: InternalEntry): Promise<boolean> {
+    if (!entry.fileId) return false;
+
+    try {
+      const stored = await getFile(entry.fileId);
+      if (stored.status !== "ready") return false;
+
+      entry.status = "done";
+      entry.progress = 100;
+      entry.bytesUploaded = entry.file.size;
+      entry.error = null;
+      this.onInvalidate?.();
+      return true;
+    } catch {
+      return false;
     }
   }
 
