@@ -352,11 +352,12 @@ async def complete_upload(
                 parts=s3_parts,
             )
         except Exception:
-            try:
-                await asyncio.to_thread(abort_multipart_upload, record.object_key, upload_id)
-            except Exception as abort_exc:  # pragma: no cover
-                logger.warning("Failed to abort multipart upload %s: %s", upload_id, abort_exc)
-            raise
+            # Completing a multipart upload is an ambiguous operation: storage may
+            # have assembled the object even when the response was lost. Recover
+            # that case instead of aborting/deleting a valid upload.
+            head = await asyncio.to_thread(head_object, record.object_key)
+            if head is None:
+                raise
         record.multipart_upload_id = None
     else:
         head = await asyncio.to_thread(head_object, record.object_key)
