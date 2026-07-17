@@ -343,7 +343,10 @@ export class UploadQueue {
     );
     if (pending.length === 0) return;
 
-    const batch = pending.slice(0, BATCH_CREATE_SIZE);
+    const parentFolderId = pending[0].targetParentFolderId;
+    const batch = pending
+      .filter((entry) => entry.targetParentFolderId === parentFolderId)
+      .slice(0, BATCH_CREATE_SIZE);
     for (const entry of batch) {
       entry.status = "creating";
     }
@@ -351,7 +354,7 @@ export class UploadQueue {
 
     try {
       const folderIds = await ensureFolderPaths(
-        batch[0]?.targetParentFolderId ?? this.baseFolderId,
+        parentFolderId,
         batch.map((e) => e.folderSegments)
       );
       const results = await createFilesBatch(
