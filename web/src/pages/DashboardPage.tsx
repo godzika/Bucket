@@ -13,7 +13,7 @@ export function DashboardPage() {
   const folderId = folderParam || null;
 
   const listing = useFilesystemList(folderId);
-  const currentFolderId = listing.data?.folder_id ?? null;
+  const currentFolderId = folderId ?? listing.data?.folder_id ?? null;
   const upload = useUpload(currentFolderId);
 
   const folders = listing.data?.folders ?? [];
