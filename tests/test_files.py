@@ -141,9 +141,99 @@ async def test_multipart_upload_flow(client, unique_email, monkeypatch):
     assert complete.json()["status"] == "ready"
     assert complete.json()["size_bytes"] == len(payload)
 
+    # Retried /complete after a successful multipart finish must not delete the
+    # assembled object (regression: ready files used to take the single-PUT path).
+    complete_again = await client.post(
+        f"/api/files/{body['file_id']}/complete",
+        json={"parts": uploaded},
+        headers=auth,
+    )
+    assert complete_again.status_code == 200, complete_again.text
+    assert complete_again.json()["status"] == "ready"
+    assert complete_again.json()["size_bytes"] == len(payload)
+
     dl = await client.get(f"/api/files/{body['file_id']}/download", headers=auth)
     assert dl.status_code == 200
 
+    async with httpx.AsyncClient() as raw:
+        got = await raw.get(dl.json()["download_url"])
+        assert got.status_code == 200
+        assert got.content == payload
+
+
+@pytest.mark.asyncio
+async def test_complete_ready_multipart_is_idempotent(client, unique_email, monkeypatch):
+    """A second /complete on a ready multipart file must not wipe storage."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "single_put_max_bytes", 0)
+    part_size = 5 * 1024 * 1024
+    monkeypatch.setattr(settings, "multipart_part_size_bytes", part_size)
+
+    token = await _register_and_login(client, unique_email)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    payload = b"y" * (part_size + 1)
+    create = await client.post(
+        "/api/files",
+        json={
+            "filename": "idempotent.bin",
+            "content_type": "application/octet-stream",
+            "size_bytes": len(payload),
+        },
+        headers=auth,
+    )
+    assert create.status_code == 201, create.text
+    body = create.json()
+    assert body["upload_method"] == "multipart"
+
+    presign = await client.post(
+        f"/api/files/{body['file_id']}/upload-parts",
+        json={"part_numbers": [1, 2]},
+        headers=auth,
+    )
+    assert presign.status_code == 200, presign.text
+    parts_out = presign.json()["parts"]
+
+    uploaded: list[dict[str, object]] = []
+    async with httpx.AsyncClient() as raw:
+        for part in parts_out:
+            n = part["part_number"]
+            begin = (n - 1) * part_size
+            end = min(begin + part_size, len(payload))
+            chunk = payload[begin:end]
+            put = await raw.put(
+                part["upload_url"],
+                content=chunk,
+                headers=part.get("upload_headers") or {},
+            )
+            assert put.status_code in (200, 204), put.text
+            etag = put.headers.get("etag") or put.headers.get("ETag")
+            assert etag
+            uploaded.append({"part_number": n, "etag": etag})
+
+    first = await client.post(
+        f"/api/files/{body['file_id']}/complete",
+        json={"parts": uploaded},
+        headers=auth,
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "ready"
+
+    # Empty-body retry mimics clients that only retry the completion call.
+    second = await client.post(
+        f"/api/files/{body['file_id']}/complete",
+        headers=auth,
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "ready"
+    assert second.json()["size_bytes"] == len(payload)
+
+    meta = await client.get(f"/api/files/{body['file_id']}", headers=auth)
+    assert meta.status_code == 200
+    assert meta.json()["status"] == "ready"
+
+    dl = await client.get(f"/api/files/{body['file_id']}/download", headers=auth)
+    assert dl.status_code == 200
     async with httpx.AsyncClient() as raw:
         got = await raw.get(dl.json()["download_url"])
         assert got.status_code == 200
