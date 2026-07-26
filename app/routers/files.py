@@ -336,6 +336,17 @@ async def complete_upload(
     record = await get_owned_file(file_id, current, db)
     settings = get_settings()
 
+    # Idempotent for ready files. Without this guard, a second /complete on a
+    # finished multipart upload falls into the single-PUT branch (multipart_upload_id
+    # was cleared) and deletes the object for exceeding single_put_max_bytes.
+    if record.status == "ready":
+        return record
+    if record.status != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Upload is no longer pending.",
+        )
+
     if record.multipart_upload_id is not None:
         if not payload.parts:
             raise HTTPException(
