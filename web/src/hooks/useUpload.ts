@@ -114,6 +114,10 @@ export function useUpload(currentFolderId?: string | null) {
     uploadQueue.clearFinished();
   }, []);
 
+  const reset = useCallback(() => {
+    uploadQueue.reset();
+  }, []);
+
   return {
     summary: snapshot.summary,
     items: snapshot.items,
@@ -126,5 +130,6 @@ export function useUpload(currentFolderId?: string | null) {
     cancel,
     retry,
     clearFinished,
+    reset,
   };
 }
