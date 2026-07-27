@@ -228,6 +228,7 @@ docker compose exec api pytest -q
 ```
 
 Folder coverage includes root listing/create, ensure-paths + batch placement, duplicate-name conflicts, and subtree delete.
+
 Frontend type-check/build:
 
 ```bash
