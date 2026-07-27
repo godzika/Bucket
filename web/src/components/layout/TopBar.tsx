@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/lib/auth-store";
+import { uploadQueue } from "@/lib/uploadQueue";
 
 export function TopBar() {
   const { theme, toggle } = useTheme();
@@ -20,6 +21,9 @@ export function TopBar() {
   const clear = useAuthStore((s) => s.clear);
 
   function logout() {
+    // Clear the in-memory upload queue before dropping the session so a later
+    // login on this SPA cannot retry another user's retained File blobs.
+    uploadQueue.reset();
     clear();
     navigate("/login", { replace: true });
   }

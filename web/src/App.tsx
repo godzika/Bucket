@@ -8,6 +8,7 @@ import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/lib/auth-store";
 import { me } from "@/lib/api/auth";
+import { uploadQueue } from "@/lib/uploadQueue";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { FileDetailPage } from "@/pages/FileDetailPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -48,7 +49,10 @@ function SessionBoot() {
     if (token && !user) {
       me()
         .then(setUser)
-        .catch(() => clear());
+        .catch(() => {
+          uploadQueue.reset();
+          clear();
+        });
     }
   }, [token, user, setUser, clear]);
 

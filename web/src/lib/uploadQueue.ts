@@ -179,9 +179,42 @@ export class UploadQueue {
   cancel(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
+    if (
+      entry.status === "done" ||
+      entry.status === "error" ||
+      entry.status === "cancelled"
+    ) {
+      return;
+    }
+    // uploading/completing: uploadEntry owns abort + cleanup (or keeps the file
+    // if /complete already committed). creating without fileId yet: batch handler
+    // cleans up when the create response arrives.
+    const deferCleanupToUploadEntry =
+      entry.status === "uploading" || entry.status === "completing";
     entry.abortController?.abort();
     entry.status = "cancelled";
     entry.error = null;
+    this.markDirty();
+    if (!deferCleanupToUploadEntry && entry.fileId) {
+      const fileId = entry.fileId;
+      entry.fileId = null;
+      entry.createOut = null;
+      void this.cleanupPendingFile(fileId);
+    }
+  }
+
+  /** Drop all in-memory queue state (e.g. on logout). Does not call the API. */
+  reset(): void {
+    for (const entry of this.entries.values()) {
+      entry.abortController?.abort();
+    }
+    this.entries.clear();
+    this.activeSlots = 0;
+    this.waiters = [];
+    this.errorToastShown = false;
+    this.speedBytes = 0;
+    this.speedSampleAt = 0;
+    this.speedSampleUploaded = 0;
     this.markDirty();
   }
 
@@ -365,6 +398,12 @@ export class UploadQueue {
         const entry = batch[i];
         const created = results[i];
         if (!created) continue;
+        // Cancel during "creating" must stick: do not revive the item when the
+        // batch response arrives, and remove the pending server record.
+        if (entry.status === "cancelled") {
+          void this.cleanupPendingFile(created.file_id);
+          continue;
+        }
         entry.createOut = created;
         entry.fileId = created.file_id;
         entry.status = "queued";
@@ -405,8 +444,8 @@ export class UploadQueue {
     if (!entry.createOut || !entry.fileId) return;
 
     try {
-      if (signal?.aborted) {
-        entry.status = "cancelled";
+      if (this.isCancelled(entry, signal)) {
+        await this.markCancelledAndCleanup(entry);
         return;
       }
 
@@ -419,8 +458,8 @@ export class UploadQueue {
 
       if (created.upload_method === "multipart") {
         const parts = await this.uploadMultipart(entry, created, onProgress, signal);
-        if (signal?.aborted) {
-          entry.status = "cancelled";
+        if (this.isCancelled(entry, signal)) {
+          await this.markCancelledAndCleanup(entry);
           return;
         }
         entry.status = "completing";
@@ -429,8 +468,8 @@ export class UploadQueue {
         await completeFile(entry.fileId, parts);
       } else {
         await this.uploadSinglePut(entry, created, onProgress, signal);
-        if (signal?.aborted) {
-          entry.status = "cancelled";
+        if (this.isCancelled(entry, signal)) {
+          await this.markCancelledAndCleanup(entry);
           return;
         }
         entry.status = "completing";
@@ -440,27 +479,24 @@ export class UploadQueue {
         await completeFile(entry.fileId);
       }
 
+      // If the user cancelled during finalize, the object is already committed —
+      // keep it rather than racing a destructive delete after a successful complete.
       entry.status = "done";
       entry.progress = 100;
       entry.bytesUploaded = entry.file.size;
       this.onInvalidate?.();
     } catch (err) {
       if (
-        signal?.aborted ||
+        this.isCancelled(entry, signal) ||
         (err instanceof Error &&
           (err.name === "CanceledError" || err.name === "AbortError"))
       ) {
-        entry.status = "cancelled";
+        await this.markCancelledAndCleanup(entry);
         return;
       }
       const fileId = entry.fileId;
       if (fileId) {
-        try {
-          await deleteFile(fileId);
-          this.onInvalidate?.();
-        } catch {
-          // best-effort
-        }
+        await this.cleanupPendingFile(fileId);
       }
       const message = apiErrorMessage(err, "Upload failed");
       entry.status = "error";
@@ -471,6 +507,29 @@ export class UploadQueue {
     } finally {
       entry.abortController = null;
       this.markDirty();
+    }
+  }
+
+  private isCancelled(entry: InternalEntry, signal?: AbortSignal): boolean {
+    return entry.status === "cancelled" || Boolean(signal?.aborted);
+  }
+
+  private async markCancelledAndCleanup(entry: InternalEntry): Promise<void> {
+    entry.status = "cancelled";
+    const fileId = entry.fileId;
+    entry.fileId = null;
+    entry.createOut = null;
+    if (fileId) {
+      await this.cleanupPendingFile(fileId);
+    }
+  }
+
+  private async cleanupPendingFile(fileId: string): Promise<void> {
+    try {
+      await deleteFile(fileId);
+      this.onInvalidate?.();
+    } catch {
+      // best-effort — listing may still show a pending row until manual delete
     }
   }
 
