@@ -227,7 +227,7 @@ docker compose exec api pip install pytest pytest-asyncio
 docker compose exec api pytest -q
 ```
 
-Folder coverage includes root creation, ensure-paths, rename/move cycle rejection, and subtree delete behavior.
+Folder coverage includes root listing/create, ensure-paths + batch placement, duplicate-name conflicts, and subtree delete.
 Frontend type-check/build:
 
 ```bash
