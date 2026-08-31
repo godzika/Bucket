@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
@@ -8,21 +8,12 @@ import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/lib/auth-store";
 import { me } from "@/lib/api/auth";
+import { queryClient } from "@/lib/queryClient";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { FileDetailPage } from "@/pages/FileDetailPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
 import { RegisterPage } from "@/pages/RegisterPage";
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-  },
-});
 
 function ThemeBoot() {
   const { theme } = useTheme();
