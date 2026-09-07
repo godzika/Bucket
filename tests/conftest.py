@@ -5,9 +5,9 @@ path is to run them inside the api container, after `docker compose up -d`:
 
     docker compose exec api pytest -q
 
-The fixture below rewrites ``S3_PUBLIC_ENDPOINT_URL`` to the internal endpoint
-when we detect a host-style ``localhost:9000`` value; otherwise the in-process
-test would try to hit MinIO via localhost which only resolves on the host.
+The fixture below rewrites ``S3_PUBLIC_ENDPOINT_URL`` to ``S3_ENDPOINT_URL``
+whenever they differ, so in-process tests can PUT/GET presigned URLs from
+inside the API container. ``scripts/smoke_test.py`` does **not** do this rewrite.
 """
 from __future__ import annotations
 
