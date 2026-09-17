@@ -43,6 +43,8 @@ class FileCreateIn(BaseModel):
             raise ValueError("filename must be a safe basename")
         if "/" in v:
             raise ValueError("filename must be a single name, not a path")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
+            raise ValueError("filename cannot contain control characters")
         return v
 
 
