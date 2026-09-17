@@ -109,15 +109,26 @@ def presigned_put(
     }
 
 
+def _header_safe_filename(filename: str) -> str:
+    """Strip characters that cannot appear in an HTTP header value (RFC 7230).
+
+    Control bytes (CR/LF/NUL/etc.) must not reach Content-Disposition: Go's
+    net/http skips invalid header values entirely, which would drop
+    ``attachment`` and let a same-origin download render attacker HTML.
+    """
+    return "".join(ch for ch in filename if ch.isprintable() and ch not in {'"', "\\"})
+
+
 def _content_disposition(filename: str) -> str:
     """Build an RFC 5987-compatible Content-Disposition header.
 
     Falls back to an ASCII-only filename for legacy clients and provides
     ``filename*=UTF-8''<percent-encoded>`` for modern ones.
     """
-    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "download"
-    ascii_fallback = ascii_fallback.replace('"', "").replace("\\", "")
-    encoded = quote(filename.encode("utf-8"), safe="")
+    safe_filename = _header_safe_filename(filename)
+    ascii_fallback = safe_filename.encode("ascii", "ignore").decode("ascii") or "download"
+    ascii_fallback = _header_safe_filename(ascii_fallback) or "download"
+    encoded = quote(safe_filename.encode("utf-8"), safe="")
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
