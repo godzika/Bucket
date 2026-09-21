@@ -1,6 +1,17 @@
-"""End-to-end smoke test against the running stack from inside the api container.
+"""End-to-end smoke test against an already-running API.
 
-Run with:
+This script does **not** rewrite ``S3_PUBLIC_ENDPOINT_URL`` and sends no
+``Origin`` header, so the API signs PUT/GET URLs with the configured public
+endpoint (default ``http://localhost:5173``).
+
+Preferred (host, with web or Vite serving the ``/files/`` proxy):
+
+    python3 scripts/smoke_test.py
+
+Inside the API container, only after pointing public S3 at something that
+container can PUT to (``localhost:5173`` is the SPA, not MinIO):
+
+    S3_PUBLIC_ENDPOINT_URL=http://minio:9000 docker compose up -d --force-recreate api
     docker compose exec api python scripts/smoke_test.py
 """
 from __future__ import annotations
